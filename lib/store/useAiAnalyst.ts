@@ -39,6 +39,7 @@ function localFallback(snapshot: Snapshot, reason: string): InterpretResponse {
     interpretation: ruleBasedInterpretation(snapshot),
     fallback_reason: reason,
     latency_ms: 0,
+    received_at: Date.now(),
   };
 }
 
@@ -56,7 +57,7 @@ export async function requestInterpretation(snapshot: Snapshot): Promise<Interpr
       body: JSON.stringify({ mode: "interpret", snapshot }),
     });
     const body: unknown = await res.json().catch(() => null);
-    if (isInterpretResponse(body) && body.interpretation && InterpretationSchema.safeParse(body.interpretation).success) return body;
+    if (isInterpretResponse(body) && body.interpretation && InterpretationSchema.safeParse(body.interpretation).success) return { ...body, received_at: Date.now() };
     const err = typeof body === "object" && body !== null && "error" in body ? String((body as { error: unknown }).error) : `HTTP ${res.status}`;
     return localFallback(snapshot, `Server could not interpret (${err}).`);
   } catch (e) {
@@ -105,8 +106,12 @@ export function useAiController() {
     if (!snapshot) return;
     const forced = nonce !== lastNonce.current;
     lastNonce.current = nonce;
-    const cached = useAppStore.getState().interpretations[snapshot.snapshot_id];
-    if (!forced && (cached || !autoUpdate)) return;
+    const state = useAppStore.getState();
+    const cached = state.interpretations[snapshot.snapshot_id];
+    // A rule-based fallback caused by a transient LLM problem (rate limit, timeout) is retried
+    // automatically after a minute when an LLM is configured.
+    const retryable = Boolean(cached && cached.source === "fallback" && state.provider?.configured && Date.now() - (cached.received_at ?? 0) > 60_000);
+    if (!forced && ((cached && !retryable) || !autoUpdate)) return;
     if (!forced && inFlight.current === snapshot.snapshot_id) return;
     const id = snapshot.snapshot_id;
     const timer = setTimeout(

@@ -84,7 +84,7 @@ async function openAiCompatible(url: string, cfg: ProviderConfig, req: ChatReque
     body: JSON.stringify({
       model: cfg.model,
       temperature: 0.2,
-      max_tokens: req.maxTokens ?? 2000,
+      max_tokens: req.maxTokens ?? 1400,
       messages: [{ role: "system", content: req.system }, ...req.messages],
       ...(req.json ? { response_format: { type: "json_object" } } : {}),
     }),
@@ -106,7 +106,7 @@ async function gemini(cfg: ProviderConfig, req: ChatRequest, fetchImpl: FetchLik
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: req.system }] },
       contents: req.messages.map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
-      generationConfig: { temperature: 0.2, maxOutputTokens: req.maxTokens ?? 2048, ...(req.json ? { responseMimeType: "application/json" } : {}) },
+      generationConfig: { temperature: 0.2, maxOutputTokens: req.maxTokens ?? 1400, ...(req.json ? { responseMimeType: "application/json" } : {}) },
     }),
     signal,
   });
@@ -125,7 +125,7 @@ async function anthropic(cfg: ProviderConfig, req: ChatRequest, fetchImpl: Fetch
     headers: { "Content-Type": "application/json", "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01" },
     body: JSON.stringify({
       model: cfg.model,
-      max_tokens: req.maxTokens ?? 2000,
+      max_tokens: req.maxTokens ?? 1400,
       temperature: 0.2,
       system: req.system,
       messages: req.messages,
@@ -158,7 +158,7 @@ export async function callProvider(cfg: ProviderConfig, req: ChatRequest, fetchI
 /* ------------------------------------------------------------------ */
 
 /** Models that are not general chat models. */
-const NOT_CHAT = /whisper|tts|speech|audio|transcri|guard|embed|moderation|image|dall-e|realtime|vision-preview|playai|orpheus|search|computer-use|codex|aqa|imagen|veo|learnlm|instruct$/i;
+const NOT_CHAT = /whisper|tts|speech|audio|transcri|guard|embed|moderation|image|dall-e|realtime|vision-preview|playai|orpheus|search|computer-use|codex|aqa|imagen|veo|learnlm|turbo-instruct/i;
 
 /** Preference order per provider when the configured model is unavailable. */
 const PREFERENCES: Record<ProviderId, RegExp[]> = {
@@ -217,6 +217,11 @@ export async function listModels(cfg: ProviderConfig, fetchImpl: FetchLike, sign
     .filter((m) => m.active !== false)
     .map((m) => String(m.id ?? ""))
     .filter(Boolean);
+}
+
+/** 429: this model's rate limit (requests or tokens per minute) is exhausted. */
+export function isRateLimited(e: unknown): boolean {
+  return e instanceof ProviderError && e.status === 429;
 }
 
 /** A 404, or a 400 that mentions the model, means the configured model is unavailable. */

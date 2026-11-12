@@ -319,7 +319,7 @@ describe("18: LLM route resilience", () => {
     const r = await handleInterpret(body, { env: { OPENAI_API_KEY: "test-key" }, fetchImpl: async () => { calls += 1; return chat("{\"executive_summary\": 5}"); }, ip: "t4" });
     expect(calls).toBe(2);
     expect("source" in r.body && r.body.source).toBe("fallback");
-    expect("fallback_reason" in r.body && r.body.fallback_reason).toMatch(/rejected/);
+    expect("fallback_reason" in r.body && r.body.fallback_reason).toMatch(/could not be used/);
   });
 
   it("timeout: falls back without hanging", async () => {
@@ -381,7 +381,7 @@ describe("adaptive behaviour at the 8-month boundary", () => {
   });
 });
 
-describe("18b: retired LLM model recovery", () => {
+describe("18b: retired or rate-limited LLM model recovery", () => {
   const ing = sample();
   const snap = buildSnapshot(run(ing.rows, {}, ing), "Sample dataset (simulated)");
   const body = JSON.stringify({ mode: "interpret", snapshot: snap });
@@ -407,6 +407,33 @@ describe("18b: retired LLM model recovery", () => {
     // the discovered model is remembered for later requests and reported by the status endpoint
     expect(providerStatus({ GROQ_API_KEY: "x" }).model).toBe("openai/gpt-oss-120b");
     resetModelCache();
+  });
+
+  it("on a 429 for one model, tries another model for that request and reports a clean reason if all are limited", async () => {
+    resetRateLimiter();
+    resetModelCache();
+    const used: string[] = [];
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      if (url.endsWith("/models")) return new Response(JSON.stringify({ data: [{ id: "llama-3.3-70b-versatile" }, { id: "meta-llama/llama-4-scout-17b-16e-instruct" }] }), { status: 200 });
+      const model = JSON.parse(String(init.body)).model as string;
+      used.push(model);
+      if (model === "llama-3.3-70b-versatile") return new Response(JSON.stringify({ error: { message: "Rate limit reached for model in organization org_secret" } }), { status: 429 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(good) } }] }), { status: 200 });
+    };
+    const r = await handleInterpret(body, { env: { GROQ_API_KEY: "test-key" }, fetchImpl, ip: "m2" });
+    expect("source" in r.body && r.body.source).toBe("llm");
+    expect(used).toEqual(["llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct"]);
+    // a rate-limit switch is per request, not remembered
+    expect(providerStatus({ GROQ_API_KEY: "x" }).model).toBe("llama-3.3-70b-versatile");
+
+    resetRateLimiter();
+    const allLimited = async (url: string) =>
+      url.endsWith("/models") ? new Response(JSON.stringify({ data: [{ id: "llama-3.3-70b-versatile" }] }), { status: 200 }) : new Response(JSON.stringify({ error: { message: "org_secret" } }), { status: 429 });
+    const r2 = await handleInterpret(body, { env: { GROQ_API_KEY: "test-key" }, fetchImpl: allLimited, ip: "m3" });
+    expect("source" in r2.body && r2.body.source).toBe("fallback");
+    const reason = "fallback_reason" in r2.body ? String(r2.body.fallback_reason) : "";
+    expect(reason).toMatch(/rate limit/);
+    expect(reason).not.toMatch(/org_secret/);
   });
 
   it("picks sensible chat models for every provider", () => {

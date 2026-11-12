@@ -156,6 +156,8 @@ export interface InterpretResponse {
   /** why the fallback was used (no key, timeout, invalid JSON, provider error) */
   fallback_reason?: string;
   latency_ms: number;
+  /** client-side receipt time, used to retry transient fallbacks */
+  received_at?: number;
 }
 
 export interface ProviderStatus {

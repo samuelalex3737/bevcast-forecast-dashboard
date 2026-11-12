@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { InterpretRequestSchema, InterpretationSchema, AskAnswerSchema, type InterpretResponse, type ProviderStatus } from "./schema";
-import { resolveProvider, callProvider, extractJson, ProviderError, listModels, pickModel, isModelUnavailable, type ChatMessage, type Env, type FetchLike, type ProviderConfig, type ProviderId } from "./providers";
+import { resolveProvider, callProvider, extractJson, ProviderError, listModels, pickModel, isModelUnavailable, isRateLimited, type ChatMessage, type Env, type FetchLike, type ProviderConfig, type ProviderId } from "./providers";
 import { SYSTEM_PROMPT, buildInterpretMessage, buildAskMessage, repairMessage } from "./prompts";
 import { ruleBasedInterpretation, ruleBasedAnswer } from "./fallback";
 
@@ -89,23 +89,30 @@ async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T
  * list the provider's current models with the same key, switch to the best one and retry.
  * cfg is mutated so later calls in the same request use the working model.
  */
-async function callWithRetry(cfg: ProviderConfig, messages: ChatMessage[], fetchImpl: FetchLike, deadline: number): Promise<string> {
+async function callWithRetry(cfg: ProviderConfig, messages: ChatMessage[], fetchImpl: FetchLike, deadline: number, maxTokens: number): Promise<string> {
   const attempt = () => {
     const remaining = Math.max(1000, deadline - Date.now());
-    return withTimeout(remaining, (signal) => callProvider(cfg, { system: SYSTEM_PROMPT, messages, json: true }, fetchImpl, signal));
+    return withTimeout(remaining, (signal) => callProvider(cfg, { system: SYSTEM_PROMPT, messages, json: true, maxTokens }, fetchImpl, signal));
   };
   try {
     return await attempt();
   } catch (e) {
-    if (isModelUnavailable(e) && deadline - Date.now() > 3000) {
-      const ids = await withTimeout(Math.max(1000, deadline - Date.now()), (signal) => listModels(cfg, fetchImpl, signal));
+    // Retired model: switch permanently. Rate-limited model: each model has its own quota, so
+    // try the next best model for this request instead of hammering the exhausted one.
+    if ((isModelUnavailable(e) || isRateLimited(e)) && deadline - Date.now() > 3000) {
+      let ids: string[] = [];
+      try {
+        ids = await withTimeout(Math.max(1000, deadline - Date.now()), (signal) => listModels(cfg, fetchImpl, signal));
+      } catch {
+        throw e;
+      }
       const next = pickModel(cfg.provider, ids.filter((id) => id !== cfg.model));
       if (!next) throw e;
       cfg.model = next;
-      discoveredModels.set(cfg.provider, next);
+      if (isModelUnavailable(e)) discoveredModels.set(cfg.provider, next);
       return attempt();
     }
-    if (e instanceof ProviderError && e.retryable && deadline - Date.now() > 3000) {
+    if (e instanceof ProviderError && e.retryable && e.status !== 429 && deadline - Date.now() > 3000) {
       await new Promise((r) => setTimeout(r, 800));
       return attempt();
     }
@@ -131,19 +138,31 @@ export function stripLongDashes<T>(value: T): T {
 }
 
 /** Ask, validate, and if invalid ask once more with a repair message. */
-async function generateValidated<T>(cfg: ProviderConfig, userMessage: string, schema: z.ZodType<T>, fetchImpl: FetchLike, deadline: number, history: ChatMessage[] = []): Promise<T> {
+async function generateValidated<T>(cfg: ProviderConfig, userMessage: string, schema: z.ZodType<T>, fetchImpl: FetchLike, deadline: number, maxTokens: number, history: ChatMessage[] = []): Promise<T> {
   const messages: ChatMessage[] = [...history, { role: "user", content: userMessage }];
-  const first = await callWithRetry(cfg, messages, fetchImpl, deadline);
+  const first = await callWithRetry(cfg, messages, fetchImpl, deadline, maxTokens);
   try {
     return stripLongDashes(schema.parse(extractJson(first)));
   } catch (e) {
-    const repaired = await callWithRetry(cfg, [...messages, { role: "assistant", content: first.slice(0, 6000) }, { role: "user", content: repairMessage(issuesOf(e)) }], fetchImpl, deadline);
+    const repaired = await callWithRetry(cfg, [...messages, { role: "assistant", content: first.slice(0, 6000) }, { role: "user", content: repairMessage(issuesOf(e)) }], fetchImpl, deadline, maxTokens);
     try {
       return stripLongDashes(schema.parse(extractJson(repaired)));
     } catch (e2) {
       throw new Error(`invalid JSON after repair (${issuesOf(e2)})`);
     }
   }
+}
+
+/** Short, user-facing explanation of why the rule-based analysis is shown (no raw provider payloads). */
+export function friendlyReason(e: unknown): string {
+  if (e instanceof ProviderError) {
+    if (e.status === 429) return "The LLM provider's free-tier rate limit was reached. Showing rule-based analysis; press Regenerate in a minute.";
+    if (e.status === 401 || e.status === 403) return "The LLM provider rejected the API key. Check the key in the deployment settings.";
+    if (e.status === 404) return "No available model was found for this API key.";
+    if (e.status >= 500) return `The LLM provider is temporarily unavailable (${e.status}). Showing rule-based analysis.`;
+    return `The LLM provider returned an error (${e.status}). Showing rule-based analysis.`;
+  }
+  return `The LLM reply could not be used (${e instanceof Error ? e.message.slice(0, 160) : String(e)}). Showing rule-based analysis.`;
 }
 
 export async function handleInterpret(rawBody: string, opts: ServiceOptions): Promise<ServiceResult> {
@@ -180,18 +199,13 @@ export async function handleInterpret(rawBody: string, opts: ServiceOptions): Pr
   const deadline = Date.now() + (opts.timeoutMs ?? 25_000);
   try {
     if (req.mode === "interpret") {
-      const interpretation = await generateValidated(cfg, buildInterpretMessage(snapshot), InterpretationSchema, opts.fetchImpl, deadline);
+      const interpretation = await generateValidated(cfg, buildInterpretMessage(snapshot), InterpretationSchema, opts.fetchImpl, deadline, 1400);
       return { status: 200, body: { source: "llm", provider: cfg.provider, model: cfg.model, snapshot_id: snapshot.snapshot_id, interpretation, latency_ms: Date.now() - started } };
     }
-    const answer = await generateValidated(cfg, buildAskMessage(snapshot, req.question), AskAnswerSchema, opts.fetchImpl, deadline, req.history.slice(-6));
+    const answer = await generateValidated(cfg, buildAskMessage(snapshot, req.question), AskAnswerSchema, opts.fetchImpl, deadline, 500, req.history.slice(-6));
     return { status: 200, body: { source: "llm", provider: cfg.provider, model: cfg.model, snapshot_id: snapshot.snapshot_id, answer: answer.answer, latency_ms: Date.now() - started } };
   } catch (e) {
-    const reason =
-      e instanceof TimeoutError
-        ? e.message
-        : e instanceof ProviderError
-          ? `Provider error (${e.status}): ${e.message.replace(/sk-[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+/g, "[key]").slice(0, 240)}`
-          : `LLM output rejected: ${e instanceof Error ? e.message : String(e)}`;
+    const reason = e instanceof TimeoutError ? `${e.message}. Showing rule-based analysis.` : friendlyReason(e);
     return fallback(reason);
   }
 }
