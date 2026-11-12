@@ -1,0 +1,49 @@
+month,region,units,avg_temp_c,promo
+2025-11,Dubai,6450,27,0
+2025-11,Abu Dhabi,4100,27.5,0
+2025-11,Sharjah & Northern Emirates,3090,26.5,0
+2025-11,Al Ain,1650,28.5,0
+2025-12,Dubai,9060,22,1
+2025-12,Abu Dhabi,6340,22.5,1
+2025-12,Sharjah & Northern Emirates,4680,21.5,1
+2025-12,Al Ain,2450,23.5,1
+2026-01,Dubai,12700,20,0
+2026-01,Abu Dhabi,8300,20.5,0
+2026-01,Sharjah & Northern Emirates,6180,19.5,0
+2026-01,Al Ain,3300,21.5,0
+2026-02,Dubai,18810,21,0
+2026-02,Abu Dhabi,13360,21.5,0
+2026-02,Sharjah & Northern Emirates,8960,20.5,0
+2026-02,Al Ain,4520,22.5,0
+2026-03,Dubai,30840,24,1
+2026-03,Abu Dhabi,19660,24.5,1
+2026-03,Sharjah & Northern Emirates,14780,23.5,1
+2026-03,Al Ain,7550,25.5,1
+2026-04,Dubai,36490,28,0
+2026-04,Abu Dhabi,24110,28.5,0
+2026-04,Sharjah & Northern Emirates,18230,27.5,0
+2026-04,Al Ain,9070,29.5,0
+2026-05,Dubai,46460,33,0
+2026-05,Abu Dhabi,31460,33.5,0
+2026-05,Sharjah & Northern Emirates,22820,32.5,0
+2026-05,Al Ain,11890,34.5,0
+2026-06,Dubai,61090,35,1
+2026-06,Abu Dhabi,41230,35.5,1
+2026-06,Sharjah & Northern Emirates,30940,34.5,1
+2026-06,Al Ain,14510,36.5,1
+2026-07,Dubai,64090,37,1
+2026-07,Abu Dhabi,42600,37.5,1
+2026-07,Sharjah & Northern Emirates,31740,36.5,1
+2026-07,Al Ain,16960,38.5,1
+2026-08,Dubai,59760,37,0
+2026-08,Abu Dhabi,38960,37.5,0
+2026-08,Sharjah & Northern Emirates,27230,36.5,0
+2026-08,Al Ain,15210,38.5,0
+2026-09,Dubai,58750,34,0
+2026-09,Abu Dhabi,39290,34.5,0
+2026-09,Sharjah & Northern Emirates,25940,33.5,0
+2026-09,Al Ain,14170,35.5,0
+2026-10,Dubai,53460,31,0
+2026-10,Abu Dhabi,36270,31.5,0
+2026-10,Sharjah & Northern Emirates,25980,30.5,0
+2026-10,Al Ain,13290,32.5,0
