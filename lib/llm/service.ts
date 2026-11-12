@@ -1,8 +1,9 @@
 import { z } from "zod";
-import { InterpretRequestSchema, InterpretationSchema, AskAnswerSchema, type InterpretResponse, type ProviderStatus } from "./schema";
+import { InterpretRequestSchema, AskAnswerSchema, type InterpretResponse, type ProviderStatus } from "./schema";
 import { resolveProvider, callProvider, extractJson, ProviderError, listModels, pickModel, isModelUnavailable, isRateLimited, type ChatMessage, type Env, type FetchLike, type ProviderConfig, type ProviderId } from "./providers";
 import { SYSTEM_PROMPT, buildInterpretMessage, buildAskMessage, repairMessage } from "./prompts";
 import { ruleBasedInterpretation, ruleBasedAnswer } from "./fallback";
+import { parseInterpretation } from "./normalize";
 
 export const MAX_BODY_BYTES = 50 * 1024;
 const RATE_LIMIT = 10;
@@ -137,18 +138,44 @@ export function stripLongDashes<T>(value: T): T {
   return value;
 }
 
-/** Ask, validate, and if invalid ask once more with a repair message. */
-async function generateValidated<T>(cfg: ProviderConfig, userMessage: string, schema: z.ZodType<T>, fetchImpl: FetchLike, deadline: number, maxTokens: number, history: ChatMessage[] = []): Promise<T> {
+class LlmOutputError extends Error {
+  preview: string;
+  constructor(message: string, preview: string) {
+    super(message);
+    this.name = "LlmOutputError";
+    this.preview = preview;
+  }
+}
+
+const preview = (t: string) => t.replace(/\s+/g, " ").slice(0, 400);
+
+/**
+ * Ask, validate, and if invalid ask once more with a repair message. parse(raw, final) throws on
+ * an unusable reply; final = true allows partial acceptance on the last attempt.
+ */
+async function generateValidated<T>(
+  cfg: ProviderConfig,
+  userMessage: string,
+  parse: (raw: unknown, final: boolean) => T,
+  fetchImpl: FetchLike,
+  deadline: number,
+  maxTokens: number,
+  history: ChatMessage[] = [],
+): Promise<T> {
   const messages: ChatMessage[] = [...history, { role: "user", content: userMessage }];
   const first = await callWithRetry(cfg, messages, fetchImpl, deadline, maxTokens);
   try {
-    return stripLongDashes(schema.parse(extractJson(first)));
+    return stripLongDashes(parse(extractJson(first), false));
   } catch (e) {
     const repaired = await callWithRetry(cfg, [...messages, { role: "assistant", content: first.slice(0, 6000) }, { role: "user", content: repairMessage(issuesOf(e)) }], fetchImpl, deadline, maxTokens);
     try {
-      return stripLongDashes(schema.parse(extractJson(repaired)));
+      return stripLongDashes(parse(extractJson(repaired), true));
     } catch (e2) {
-      throw new Error(`invalid JSON after repair (${issuesOf(e2)})`);
+      try {
+        return stripLongDashes(parse(extractJson(first), true));
+      } catch {
+        throw new LlmOutputError(`invalid JSON after repair (${issuesOf(e2)})`, preview(repaired));
+      }
     }
   }
 }
@@ -199,13 +226,34 @@ export async function handleInterpret(rawBody: string, opts: ServiceOptions): Pr
   const deadline = Date.now() + (opts.timeoutMs ?? 25_000);
   try {
     if (req.mode === "interpret") {
-      const interpretation = await generateValidated(cfg, buildInterpretMessage(snapshot), InterpretationSchema, opts.fetchImpl, deadline, 1400);
-      return { status: 200, body: { source: "llm", provider: cfg.provider, model: cfg.model, snapshot_id: snapshot.snapshot_id, interpretation, latency_ms: Date.now() - started } };
+      const parsed = await generateValidated(cfg, buildInterpretMessage(snapshot), (raw, final) => parseInterpretation(raw, snapshot, final), opts.fetchImpl, deadline, 1800);
+      return {
+        status: 200,
+        body: {
+          source: "llm",
+          provider: cfg.provider,
+          model: cfg.model,
+          snapshot_id: snapshot.snapshot_id,
+          interpretation: parsed.interpretation,
+          ...(parsed.completed.length ? { completed_fields: parsed.completed } : {}),
+          latency_ms: Date.now() - started,
+        },
+      };
     }
-    const answer = await generateValidated(cfg, buildAskMessage(snapshot, req.question), AskAnswerSchema, opts.fetchImpl, deadline, 500, req.history.slice(-6));
+    const answer = await generateValidated(
+      cfg,
+      buildAskMessage(snapshot, req.question),
+      (raw) => AskAnswerSchema.parse(typeof raw === "object" && raw !== null && "answer" in raw ? raw : { answer: typeof raw === "string" ? raw : Object.values(raw as Record<string, unknown>).filter((v) => typeof v === "string").join(" ") }),
+      opts.fetchImpl,
+      deadline,
+      600,
+      req.history.slice(-6),
+    );
     return { status: 200, body: { source: "llm", provider: cfg.provider, model: cfg.model, snapshot_id: snapshot.snapshot_id, answer: answer.answer, latency_ms: Date.now() - started } };
   } catch (e) {
     const reason = e instanceof TimeoutError ? `${e.message}. Showing rule-based analysis.` : friendlyReason(e);
-    return fallback(reason);
+    const res = fallback(reason);
+    if (e instanceof LlmOutputError && "source" in res.body) res.body.debug_preview = e.preview.replace(/sk-[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+/g, "[key]");
+    return res;
   }
 }

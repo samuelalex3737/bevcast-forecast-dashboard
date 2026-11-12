@@ -93,8 +93,9 @@ function normaliseOwner(v: unknown): unknown {
 
 /** Keep at most 3 sentences. */
 export function firstSentences(text: string, max = 3): string {
-  const parts = text.trim().match(/[^.!?]+(?:[.!?]+(?=\s|$)|$)/g) ?? [text];
-  return parts.slice(0, max).join("").trim();
+  // A sentence ends at . ! or ? followed by whitespace, so decimals such as 3.09% stay intact.
+  const parts = text.trim().split(/(?<=[.!?])\s+/);
+  return parts.slice(0, max).join(" ").trim();
 }
 
 const RecommendationSchema = z.object({
@@ -158,6 +159,10 @@ export interface InterpretResponse {
   latency_ms: number;
   /** client-side receipt time, used to retry transient fallbacks */
   received_at?: number;
+  /** sections the LLM omitted that were completed by the rule-based analyst */
+  completed_fields?: string[];
+  /** first characters of an unusable LLM reply, for diagnosis (not shown in the UI) */
+  debug_preview?: string;
 }
 
 export interface ProviderStatus {

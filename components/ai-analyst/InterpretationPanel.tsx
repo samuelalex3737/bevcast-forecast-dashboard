@@ -55,6 +55,9 @@ export function StatusBar() {
           </Badge>
         ) : null}
         {response?.fallback_reason ? <span className="text-[12px] text-muted-foreground">{response.fallback_reason}</span> : null}
+        {response?.completed_fields?.length ? (
+          <span className="text-[12px] text-muted-foreground">The LLM omitted {response.completed_fields.map((f) => f.replace(/_/g, " ")).join(", ")}; those sections come from the rule-based engine.</span>
+        ) : null}
       </div>
       <div className="flex items-center gap-3">
         <label className="flex items-center gap-2 text-[13px]">

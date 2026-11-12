@@ -115,3 +115,64 @@ describe("LLM output sanitising", () => {
     expect(out).toEqual({ a: "Sales rose - fast", b: ["Q1 - Q2"], c: 5 });
   });
 });
+
+describe("normalising loosely shaped LLM replies", () => {
+  const csv = readFileSync(path.join(__dirname, "fixtures", "sample_sales.csv"), "utf8");
+  const ing = ingestText(csv);
+  const snap = buildSnapshot(runEngine({ rows: ing.rows, settings: DEFAULT_SETTINGS, scenario: {}, ingestNotices: [], rejected: [] }), "Sample dataset (simulated)");
+
+  it("unwraps a wrapper object, maps renamed keys and converts strings to lists", async () => {
+    const { parseInterpretation } = await import("@/lib/llm/normalize");
+    const raw = {
+      interpretation: {
+        "Executive Summary": "Sales peaked at 155,390 units in Jul 2026. Moving Avg leads with WAPE 3.09%.",
+        seasonality: "Seasonality is only partially captured because there are only 12 months.",
+        best_model: { model: "Moving Avg", reason: "Lowest hold-out WAPE of 3.09%.", caveats: "Short hold-out." },
+        model_comparison: ["Baselines beat ML models.", "ML models over-forecast."],
+        recommendations: {
+          r1: { recommendation: "Produce 192,500 units in Nov 2026", why: "Covers forecast plus safety stock", metric: "136,103 forecast", priority: "High", team: "manufacturing" },
+          r2: { action: "Ship 57,323 units to Dubai", rationale: "Largest share", metric_cited: "42.12%", priority: "high", owner: "logistics" },
+          r3: { action: "Keep December promo", rationale: "Promo lift", metric_cited: "18.21%", priority: "medium", owner: "marketing" },
+          r4: { action: "Retrain monthly", rationale: "Short series", metric_cited: "12 months", priority: "low", owner: "data team" },
+        },
+        risks: "Wide intervals. Cooler winter.",
+        limitations: ["Simulated data"],
+        next_steps: "Collect a second year of data.",
+      },
+    };
+    const r = parseInterpretation(raw, snap, false);
+    expect(r.completed).toEqual([]);
+    expect(r.interpretation.seasonality_and_trend.verdict).toBe("partially captured");
+    expect(r.interpretation.recommendations[0].owner).toBe("Production");
+    expect(r.interpretation.recommendations[1].owner).toBe("Distribution");
+    expect(r.interpretation.recommendations[3].owner).toBe("Data/Analytics");
+    expect(r.interpretation.best_model.name).toBe("Moving Avg");
+  });
+
+  it("completes missing sections from the rule-based analyst only on the final attempt", async () => {
+    const { parseInterpretation } = await import("@/lib/llm/normalize");
+    const raw = {
+      executive_summary: "Moving Avg is best with WAPE 3.09% and forecasts 408,310 units.",
+      seasonality_and_trend: { verdict: "not captured", explanation: "A flat average ignores the seasonal cycle." },
+      best_model: { name: "Moving Avg", why: "Lowest WAPE.", caveats: "Short hold-out." },
+      risks: ["Wide intervals", "Weather"],
+      data_limitations: ["Only 12 months"],
+    };
+    expect(() => parseInterpretation(raw, snap, false)).toThrow();
+    const r = parseInterpretation(raw, snap, true);
+    expect(r.completed.sort()).toEqual(["model_comparison_insight", "next_steps", "recommendations"]);
+    expect(r.interpretation.executive_summary).toContain("Moving Avg");
+    expect(r.interpretation.recommendations.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("rejects a reply with no usable executive summary", async () => {
+    const { parseInterpretation } = await import("@/lib/llm/normalize");
+    expect(() => parseInterpretation({ foo: "bar" }, snap, true)).toThrow();
+  });
+});
+
+describe("sentence trimming", () => {
+  it("keeps decimals intact when limiting the summary to 3 sentences", () => {
+    expect(firstSentences("WAPE is 3.09% today. Second one. Third 1.5 units. Fourth.")).toBe("WAPE is 3.09% today. Second one. Third 1.5 units.");
+  });
+});
