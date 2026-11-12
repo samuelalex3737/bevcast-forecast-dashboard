@@ -6,7 +6,7 @@ A beverage company launched a flavored water in four UAE markets and has 12 mont
 
 Everything on screen is computed at runtime from the current dataset. Edit a cell, upload a file or move a control and every model retrains in a Web Worker, every chart, KPI and caption updates, and the AI interpretation regenerates.
 
-**Live demo:** `https://<your-project>.vercel.app` (fill in after deployment)
+**Live demo:** https://bevcast-forecast-dashboard.vercel.app
 
 ---
 
@@ -185,7 +185,7 @@ git init
 git add .
 git commit -m "BevCast forecasting dashboard"
 git branch -M main
-git remote add origin https://github.com/<your-username>/bevcast-forecast-dashboard.git
+git remote add origin https://github.com/samuelalex3737/bevcast-forecast-dashboard.git
 git push -u origin main
 ```
 
@@ -194,7 +194,7 @@ Create the empty repository `bevcast-forecast-dashboard` on GitHub first (no REA
 1. On vercel.com choose **Add New, Project**, import `bevcast-forecast-dashboard` (framework preset: Next.js, defaults are correct).
 2. Under **Environment Variables** add `GROQ_API_KEY` (or another provider key).
 3. Click **Deploy**.
-4. Open `https://<your-project>.vercel.app/api/interpret`; it should return `"configured": true`.
+4. Open `https://bevcast-forecast-dashboard.vercel.app/api/interpret`; it should return `"configured": true`.
 5. Open the site: the sample data loads, and the AI Analyst shows "LLM connected".
 
 ---
