@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { InterpretRequestSchema, InterpretationSchema, AskAnswerSchema, type InterpretResponse, type ProviderStatus } from "./schema";
-import { resolveProvider, callProvider, extractJson, ProviderError, type ChatMessage, type Env, type FetchLike, type ProviderConfig } from "./providers";
+import { resolveProvider, callProvider, extractJson, ProviderError, listModels, pickModel, isModelUnavailable, type ChatMessage, type Env, type FetchLike, type ProviderConfig, type ProviderId } from "./providers";
 import { SYSTEM_PROMPT, buildInterpretMessage, buildAskMessage, repairMessage } from "./prompts";
 import { ruleBasedInterpretation, ruleBasedAnswer } from "./fallback";
 
@@ -27,8 +27,24 @@ export function resetRateLimiter(): void {
   hits.clear();
 }
 
-export function providerStatus(env: Env): ProviderStatus {
+/**
+ * Working model per provider, discovered at runtime when the configured default has been retired.
+ * Kept per serverless instance; an explicit LLM_MODEL is still tried first.
+ */
+const discoveredModels = new Map<ProviderId, string>();
+export function resetModelCache(): void {
+  discoveredModels.clear();
+}
+
+function effectiveConfig(env: Env): ProviderConfig | null {
   const cfg = resolveProvider(env);
+  if (!cfg) return null;
+  const found = discoveredModels.get(cfg.provider);
+  return found && !(env.LLM_MODEL ?? "").trim() ? { ...cfg, model: found } : { ...cfg };
+}
+
+export function providerStatus(env: Env): ProviderStatus {
+  const cfg = effectiveConfig(env);
   return { configured: cfg !== null, provider: cfg?.provider ?? null, model: cfg?.model ?? null };
 }
 
@@ -68,7 +84,11 @@ async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T
   }
 }
 
-/** One call with a single retry on 429 / 5xx. */
+/**
+ * One call with a single retry on 429 / 5xx. If the model is unavailable (retired or renamed),
+ * list the provider's current models with the same key, switch to the best one and retry.
+ * cfg is mutated so later calls in the same request use the working model.
+ */
 async function callWithRetry(cfg: ProviderConfig, messages: ChatMessage[], fetchImpl: FetchLike, deadline: number): Promise<string> {
   const attempt = () => {
     const remaining = Math.max(1000, deadline - Date.now());
@@ -77,6 +97,14 @@ async function callWithRetry(cfg: ProviderConfig, messages: ChatMessage[], fetch
   try {
     return await attempt();
   } catch (e) {
+    if (isModelUnavailable(e) && deadline - Date.now() > 3000) {
+      const ids = await withTimeout(Math.max(1000, deadline - Date.now()), (signal) => listModels(cfg, fetchImpl, signal));
+      const next = pickModel(cfg.provider, ids.filter((id) => id !== cfg.model));
+      if (!next) throw e;
+      cfg.model = next;
+      discoveredModels.set(cfg.provider, next);
+      return attempt();
+    }
     if (e instanceof ProviderError && e.retryable && deadline - Date.now() > 3000) {
       await new Promise((r) => setTimeout(r, 800));
       return attempt();
@@ -131,7 +159,7 @@ export async function handleInterpret(rawBody: string, opts: ServiceOptions): Pr
   if (!parsed.success) return { status: 400, body: { error: "Request body failed validation.", details: issuesOf(parsed.error) } };
   const req = parsed.data;
   const snapshot = req.snapshot;
-  const cfg = resolveProvider(opts.env);
+  const cfg = effectiveConfig(opts.env);
 
   const fallback = (reason: string, status = 200): ServiceResult => ({
     status,
@@ -158,7 +186,12 @@ export async function handleInterpret(rawBody: string, opts: ServiceOptions): Pr
     const answer = await generateValidated(cfg, buildAskMessage(snapshot, req.question), AskAnswerSchema, opts.fetchImpl, deadline, req.history.slice(-6));
     return { status: 200, body: { source: "llm", provider: cfg.provider, model: cfg.model, snapshot_id: snapshot.snapshot_id, answer: answer.answer, latency_ms: Date.now() - started } };
   } catch (e) {
-    const reason = e instanceof TimeoutError ? e.message : e instanceof ProviderError ? `Provider error (${e.status})` : `LLM output rejected: ${e instanceof Error ? e.message : String(e)}`;
+    const reason =
+      e instanceof TimeoutError
+        ? e.message
+        : e instanceof ProviderError
+          ? `Provider error (${e.status}): ${e.message.replace(/sk-[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|AIza[A-Za-z0-9_-]+/g, "[key]").slice(0, 240)}`
+          : `LLM output rejected: ${e instanceof Error ? e.message : String(e)}`;
     return fallback(reason);
   }
 }

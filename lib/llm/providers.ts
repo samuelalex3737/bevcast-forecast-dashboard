@@ -153,6 +153,79 @@ export async function callProvider(cfg: ProviderConfig, req: ChatRequest, fetchI
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Model discovery: survive retired default models                     */
+/* ------------------------------------------------------------------ */
+
+/** Models that are not general chat models. */
+const NOT_CHAT = /whisper|tts|speech|audio|transcri|guard|embed|moderation|image|dall-e|realtime|vision-preview|playai|orpheus|search|computer-use|codex|aqa|imagen|veo|learnlm|instruct$/i;
+
+/** Preference order per provider when the configured model is unavailable. */
+const PREFERENCES: Record<ProviderId, RegExp[]> = {
+  groq: [/llama-3\.3-70b/i, /llama.*70b/i, /gpt-oss-120b/i, /llama-4.*maverick/i, /kimi-k2/i, /llama-4.*scout/i, /qwen.*32b/i, /gpt-oss/i, /llama/i],
+  openai: [/^gpt-4o-mini$/i, /^gpt-4\.1-mini$/i, /^gpt-5-mini$/i, /^gpt-4o$/i, /mini$/i, /^gpt-/i],
+  gemini: [/gemini-2\.\d-flash$/i, /gemini-\d(\.\d)?-flash$/i, /flash(?!.*(lite|8b))/i, /flash/i, /pro/i],
+  anthropic: [/haiku/i, /sonnet/i, /opus/i],
+};
+
+export function pickModel(provider: ProviderId, ids: string[]): string | null {
+  const chat = ids.filter((id) => !NOT_CHAT.test(id) && !/preview-\d{2}-\d{2}|exp/i.test(id));
+  const pool = chat.length ? chat : ids.filter((id) => !NOT_CHAT.test(id));
+  for (const re of PREFERENCES[provider]) {
+    const hit = pool.filter((id) => re.test(id)).sort().reverse()[0];
+    if (hit) return hit;
+  }
+  return pool[0] ?? null;
+}
+
+/** List the models the key can use (server-side, same key). */
+export async function listModels(cfg: ProviderConfig, fetchImpl: FetchLike, signal: AbortSignal): Promise<string[]> {
+  let url: string;
+  let headers: Record<string, string>;
+  switch (cfg.provider) {
+    case "groq":
+      url = "https://api.groq.com/openai/v1/models";
+      headers = { Authorization: `Bearer ${cfg.apiKey}` };
+      break;
+    case "openai":
+      url = "https://api.openai.com/v1/models";
+      headers = { Authorization: `Bearer ${cfg.apiKey}` };
+      break;
+    case "gemini":
+      url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200";
+      headers = { "x-goog-api-key": cfg.apiKey };
+      break;
+    case "anthropic":
+      url = "https://api.anthropic.com/v1/models?limit=100";
+      headers = { "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01" };
+      break;
+  }
+  const res = await fetchImpl(url, { method: "GET", headers, signal });
+  if (!res.ok) throw new ProviderError(`${cfg.provider} model list returned ${res.status}`, res.status);
+  const data = asRecord(await res.json());
+  if (cfg.provider === "gemini") {
+    const models = Array.isArray(data.models) ? data.models : [];
+    return models
+      .map((m) => asRecord(m))
+      .filter((m) => Array.isArray(m.supportedGenerationMethods) && (m.supportedGenerationMethods as unknown[]).includes("generateContent"))
+      .map((m) => String(m.name ?? "").replace(/^models\//, ""))
+      .filter(Boolean);
+  }
+  const list = Array.isArray(data.data) ? data.data : [];
+  return list
+    .map((m) => asRecord(m))
+    .filter((m) => m.active !== false)
+    .map((m) => String(m.id ?? ""))
+    .filter(Boolean);
+}
+
+/** A 404, or a 400 that mentions the model, means the configured model is unavailable. */
+export function isModelUnavailable(e: unknown): boolean {
+  if (!(e instanceof ProviderError)) return false;
+  if (e.status === 404) return true;
+  return e.status === 400 && /model|decommission|deprecat|not\s+found|does not exist/i.test(e.message);
+}
+
 /** Pull the JSON object out of a reply that may contain code fences or stray text. */
 export function extractJson(text: string): unknown {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");

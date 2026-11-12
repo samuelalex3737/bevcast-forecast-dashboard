@@ -10,7 +10,8 @@ import { buildCaptions } from "@/lib/insights/captions";
 import { buildSnapshot } from "@/lib/llm/snapshot";
 import { ruleBasedInterpretation } from "@/lib/llm/fallback";
 import { InterpretationSchema } from "@/lib/llm/schema";
-import { handleInterpret, providerStatus, resetRateLimiter } from "@/lib/llm/service";
+import { handleInterpret, providerStatus, resetRateLimiter, resetModelCache } from "@/lib/llm/service";
+import { pickModel } from "@/lib/llm/providers";
 
 const fx = (name: string) => readFileSync(path.join(__dirname, "fixtures", name), "utf8");
 const sample = () => ingestText(fx("sample_sales.csv"));
@@ -377,5 +378,41 @@ describe("adaptive behaviour at the 8-month boundary", () => {
     const ok = res.models.filter((m) => m.status === "ok").map((m) => m.id).sort();
     expect(ok).toEqual(["arima", "drift", "ensemble", "gbm", "holt", "ma", "naive", "regression", "rf"]);
     expect(res.models.find((m) => m.id === "snaive")?.reason).toBe("Needs 24+ months to learn yearly seasonality");
+  });
+});
+
+describe("18b: retired LLM model recovery", () => {
+  const ing = sample();
+  const snap = buildSnapshot(run(ing.rows, {}, ing), "Sample dataset (simulated)");
+  const body = JSON.stringify({ mode: "interpret", snapshot: snap });
+  const good = ruleBasedInterpretation(snap);
+
+  it("on a 404 for the model, lists models with the same key, switches and succeeds", async () => {
+    resetRateLimiter();
+    resetModelCache();
+    const used: string[] = [];
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      if (url.endsWith("/models")) {
+        return new Response(JSON.stringify({ data: [{ id: "whisper-large-v3" }, { id: "llama-guard-4-12b" }, { id: "openai/gpt-oss-120b" }, { id: "llama-3.1-8b-instant" }] }), { status: 200 });
+      }
+      const model = JSON.parse(String(init.body)).model as string;
+      used.push(model);
+      if (model === "llama-3.3-70b-versatile") return new Response(JSON.stringify({ error: { message: "The model `llama-3.3-70b-versatile` has been decommissioned" } }), { status: 404 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(good) } }] }), { status: 200 });
+    };
+    const r = await handleInterpret(body, { env: { GROQ_API_KEY: "test-key" }, fetchImpl, ip: "m1" });
+    expect("source" in r.body && r.body.source).toBe("llm");
+    expect("model" in r.body && r.body.model).toBe("openai/gpt-oss-120b");
+    expect(used).toEqual(["llama-3.3-70b-versatile", "openai/gpt-oss-120b"]);
+    // the discovered model is remembered for later requests and reported by the status endpoint
+    expect(providerStatus({ GROQ_API_KEY: "x" }).model).toBe("openai/gpt-oss-120b");
+    resetModelCache();
+  });
+
+  it("picks sensible chat models for every provider", () => {
+    expect(pickModel("groq", ["whisper-large-v3", "llama-3.1-8b-instant", "meta-llama/llama-4-scout-17b-16e-instruct", "openai/gpt-oss-120b"])).toBe("openai/gpt-oss-120b");
+    expect(pickModel("openai", ["dall-e-3", "gpt-4.1-mini", "text-embedding-3-small", "gpt-4o-mini-tts"])).toBe("gpt-4.1-mini");
+    expect(pickModel("gemini", ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "text-embedding-004"])).toBe("gemini-2.5-flash");
+    expect(pickModel("anthropic", ["claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"])).toBe("claude-haiku-5-5");
   });
 });

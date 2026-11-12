@@ -128,7 +128,7 @@ Requires Node 22 or newer.
 ```bash
 npm install
 npm run dev          # http://localhost:3000
-npm test             # 104 unit, stress and LLM-route tests
+npm test             # 106 unit, stress and LLM-route tests
 npm run leaderboard  # prints the leaderboard on the sample data
 npm run build        # production build
 ```
@@ -161,9 +161,11 @@ Set these in `.env.local` locally or in Vercel's project settings. Only one key 
 | `GEMINI_API_KEY` | `gemini-2.0-flash` |
 | `ANTHROPIC_API_KEY` | `claude-haiku-5-5` |
 | `LLM_PROVIDER` | optional: force `groq`, `openai`, `gemini` or `anthropic` |
-| `LLM_MODEL` | optional: override the model name (use this if a default model is retired) |
+| `LLM_MODEL` | optional: override the model name |
 
 `GET /api/interpret` returns `{ configured, provider, model }` and never exposes a key.
+
+If a provider has retired the default model, the server lists that provider's current models with the same key, switches to the best available chat model, retries, and remembers the choice. No redeploy or code change is needed.
 
 ---
 
@@ -201,7 +203,7 @@ Create the empty repository `bevcast-forecast-dashboard` on GitHub first (no REA
 
 ## Quality checks
 
-* 104 Vitest tests: hand-computed metrics, every model (including ARIMA recovering an AR(1) coefficient and Holt on a perfect line), linear algebra, the 18 professor stress scenarios, LLM route resilience (no key, malformed JSON, timeout, 5xx retry, rate limit, oversized body), grounding, and house-style checks (no em dash, no TODO markers).
+* 106 Vitest tests: hand-computed metrics, every model (including ARIMA recovering an AR(1) coefficient and Holt on a perfect line), linear algebra, the 18 professor stress scenarios, LLM route resilience (no key, malformed JSON, timeout, 5xx retry, retired model, rate limit, oversized body), grounding, and house-style checks (no em dash, no TODO markers).
 * Every stress scenario asserts that no NaN or Infinity appears anywhere in the result, captions, snapshot or fallback analysis.
 * Lighthouse (production build): desktop profile Performance 96, Accessibility 100, Best Practices 100. On the default mobile profile (simulated slow CPU) Accessibility and Best Practices are 100 and Performance is about 70, limited mainly by parsing the charting library.
 
